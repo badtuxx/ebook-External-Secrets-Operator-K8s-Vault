@@ -141,7 +141,7 @@ vault server -dev
 
 Este comando inicia o Vault em modo de desenvolvimento, que é útil para fins de aprendizado e experimentação.
 
-**Configurando o Ambiente**
+**Configurando o Vault CLI para apontar para o nosso Vault**
 
 ```bash
 export VAULT_ADDR='http://127.0.0.1:8200'
@@ -171,7 +171,7 @@ Agora que você se lembrou do básico do Vault, a próxima etapa é entender com
 
 
 
-# Configurando o Campo de Batalha: Instalando e Configurando o Vault no Kubernetes
+# Instalando e Configurando o Vault no Kubernetes
 
 Vamos agora mergulhar na parte prática. Vamos configurar o Vault no Kubernetes, passo a passo, utilizando o Helm. No final deste processo, teremos o Vault instalado, configurado e pronto para o uso.
 
@@ -181,7 +181,6 @@ Antes de começar, certifique-se de que você tem o seguinte:
 
 1. Uma instância do Kubernetes em execução.
 2. O Helm instalado em sua máquina local ou no seu cluster.
-
 ## Instalando e Configurando o Vault com Helm
 
 Aqui estão os passos para instalar e configurar o Vault usando o Helm:
@@ -202,13 +201,25 @@ helm install vault hashicorp/vault
 
 Este comando instala o Vault no cluster Kubernetes.
 
-**3. Inicie uma shell interativa dentro do pod do Vault**
+**3. Instalando o CLI do Vault**
 
 ```bash
-kubectl exec -ti vault-0 -- sh
+wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+sudo apt update && sudo apt install vault
 ```
 
-Este comando inicia uma shell interativa dentro do pod do Vault, permitindo que interajamos diretamente com o Vault.
+**Configurando o Vault CLI para apontar para o nosso Vault**
+
+```bash
+kubectl get svc vault
+export VAULT_ADDR='http://<IP_SERVICE>:8200'
+vault status
+```
+
+Este comando cria uma variável de ambiente que irá permitir que interajamos diretamente com o Vault que instalamos no Kubernetes via Helm.
 
 **4. Inicialize e desbloqueie o Vault**
 
@@ -220,37 +231,44 @@ vault login
 
 Estes comandos inicializam o Vault, removem o selo e fazem login.
 
-**5. Crie uma política no Vault**
+**5. Habilite o armazenamento de segredos e adicione alguns segredos para teste**
 
 ```bash
-vault policy write external-secret-operator-policy -<<EOF
-path "data/postgres" { 
-capabilities = ["read"]
-}
-EOF
+vault secrets enable -path=linuxtips kv
+vault kv put linuxtips/senha palavra1=giropops palavra2=strigus
 ```
+Estes comandos habilitam o armazenamento de segredos e adicionam um segredo de exemplo ao caminho "linuxtips/senha".
 
-Este comando cria uma política chamada "external-secret-operator-policy" que concede permissões de leitura no caminho "data/postgres".
-
-**6. Crie um token com a política que você acabou de definir**
+**6. Crie uma política no Vault**
 
 ```bash
-vault token create -policy="external-secret-operator-policy"
+vim minha-policy.hcl
 ```
 
-Este comando cria um token vinculado à política "external-secret-operator-policy".
+Adicione esse conteúdo:
 
-**7. Habilite o armazenamento de segredos e adicione alguns segredos para teste**
+```hcl
+path "linuxtips/senha" { 
+  capabilities = ["read"]
+} 
+```
 
 ```bash
-vault secrets enable -path=data kv
-vault kv put data/postgres POSTGRES_USER=admin POSTGRES_PASSWORD=123456
+vault policy write minha-policy minha-policy.hcl
 ```
 
-Estes comandos habilitam o armazenamento de segredos e adicionam um segredo de exemplo ao caminho "data/postgres".
+Este comando cria uma política chamada "minha-policy" que concede permissões de leitura no caminho "linuxtips/senha".
+
+
+**7. Crie um token com a política que você acabou de definir**
+
+```bash
+vault token create -policy="minha-policy"
+```
+
+Este comando cria um token vinculado à política "minha-policy".
 
 E é isso! Agora você tem o Vault instalado e configurado no seu cluster Kubernetes. O próximo passo é instalar e configurar o External Secrets Operator, que é o foco principal deste eBook.
-
 
 
 # External Secrets Operator (ESO) - O Astro Desse Show
@@ -358,7 +376,6 @@ Antes de instalar o ESO, precisamos adicionar o repositório External Secrets ao
 
 ```bash
 helm repo add external-secrets https://charts.external-secrets.io
-helm repo update
 ```
 
 ## Instalando o External Secrets Operator
@@ -382,7 +399,7 @@ kubectl get all -n external-secrets
 Agora, precisamos criar um segredo no Kubernetes que contém o token do Vault. Faça isso com o seguinte comando:
 
 ```bash
-kubectl create secret generic vault-token --from-literal=token=SEU_TOKEN_DO_VAULT
+kubectl create secret generic vault-policy-token --from-literal=token=O_TOKEN_DA_POLICY_QUE_CRIAMOS
 ```
 
 Lembre-se de substituir `SEU_TOKEN_DO_VAULT` pelo token real que você obteve do Vault.
@@ -405,12 +422,12 @@ metadata:
 spec:
   provider:
     vault: #specifies vault as the provider
-      server: "http://10.43.238.17:8200" #the address of your vault instance
-      path: "data" #path for accessing the secrets
+      server: "http://IP_DO_VAULT_SVC:8200" #the address of your vault instance
+      path: "linuxtips" #path for accessing the secrets
       version: "v1" #Vault API version
       auth:
         tokenSecretRef:
-          name: "vault-token" #Use a secret called vault-token
+          name: "vault-policy-token" #Use a secret called vault-token
           key: "token" #Use this key to access the vault token
 ```
 
@@ -430,22 +447,22 @@ kind: ExternalSecret
 metadata:
   name: external-secret
 spec:
-  refreshInterval: "15s"
+  refreshInterval: "10s"
   secretStoreRef:
     name: vault-backend
     kind: ClusterSecretStore
   target:
-    name: postgres-secret
+    name: linuxtips-senhas
     creationPolicy: Owner
   data:
-    - secretKey: POSTGRES_USER
+    - secretKey: palavra1
       remoteRef:
-        key: data/postgres
-        property: POSTGRES_USER
-    - secretKey: POSTGRES_PASSWORD
+        key: linuxtips/senha
+        property: palavra1
+    - secretKey: palavra2
       remoteRef:
-        key: data/postgres
-        property: POSTGRES_PASSWORD
+        key: linuxtips/senha
+        property: palavra2
 ```
 
 Para aplicar essa configuração ao Kubernetes, use o seguinte comando:
